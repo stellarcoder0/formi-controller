@@ -17,6 +17,8 @@ import datetime as dt
 import json
 from collections import defaultdict
 
+from .faults import fault
+
 FEATURES = ("lang", "city_tier", "age_band", "value_band")
 TRACKED_DIMS = ("welcome_message", "voice", "caller_id", "prompt_version")
 SEGMENTED_DIMS = ("welcome_message", "voice")
@@ -84,6 +86,7 @@ class Ingestor:
             db.executemany("INSERT OR IGNORE INTO leads VALUES(?,?,?,?)", new_leads)
             db.executemany("INSERT OR IGNORE INTO campaigns VALUES(?,?,?,?,?)", campaigns)
             db.executemany("INSERT OR IGNORE INTO config_changes VALUES(?,?,?,?,?,?,?)", changes)
+            fault("mid_ingest_tx")  # stats written, chunk not yet marked done
             db.execute("INSERT INTO chunks_done VALUES(?,?,?,?)",
                        (n, kind, count, ts_to_minute(last_minute) if last_minute else None))
         return count

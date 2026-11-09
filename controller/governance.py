@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 
 from .client import ApiError
+from .faults import fault
 
 LIVE = ("sending", "pending", "approved", "applying")
 SAFETY_KINDS = ("incident", "rollback", "did_health")
@@ -90,6 +91,7 @@ class Governance:
                                                                    if k != "proposed_config"}, now)
         try:
             r = self.c.post("/approvals", body)
+            fault("after_approval_post")
         except ApiError as e:
             if e.code == "duplicate_proposal_id":  # a retry of a POST that already landed
                 return self._reconcile_sending(pid, wf, now)
@@ -117,6 +119,7 @@ class Governance:
                                                                 "evidence": evidence}, now)
         try:
             r = self.c.put(f"/workflows/{wf}/config", body)
+            fault("after_auto_apply")
         except ApiError as e:
             if e.code == "duplicate_proposal_id":
                 self._reconcile_sending(pid, wf, now)
@@ -180,6 +183,7 @@ class Governance:
             self._set(pid, now, status="applying")
         try:
             r = self.c.post(f"/workflows/{wf}/apply", {"approval_id": aid})
+            fault("after_apply")
         except ApiError as e:
             status = {"approval_lapsed": "lapsed", "stale_base_version": "stale"}.get(e.code)
             if status is None and e.code == "not_approved" and (e.body.get("detail") or {}).get("status") == "applied":
