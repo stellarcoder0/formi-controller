@@ -62,7 +62,9 @@ def why(db, wf, at):
             if req.get("diff"):
                 print(f"   diff     : {json.dumps(req['diff'])}")
             if req.get("dry_run"):
-                print(f"   dry run  : expected relative change {req['dry_run'].get('expected_relative_change')}")
+                dr = req["dry_run"]
+                print(f"   dry run  : {json.dumps(dr.get('dims'))[:400]}"
+                      f"{'' if dr.get('prompt_note') else ' expected relative change ' + str(dr.get('expected_relative_change'))}")
             if "impact_score" in req:
                 print(f"   impact   : {req['impact_score']}  affected leads: {req.get('affected_leads')}")
             if req.get("evidence"):

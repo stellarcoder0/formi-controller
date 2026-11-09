@@ -165,8 +165,9 @@ class Controller:
                 if "prompt_version" in dims:
                     st["screen_prompt"] = cfg["prompt_version"]
                 self.s.decide(now, wf, "supervisor_edit",
-                              f"supervisor changed {dims} (v{version}); we will not touch {held or 'nothing'}"
-                              f"{' and caller_id' if 'caller_id' in dims else ''} for {SUPERVISOR_HOLD_H}h",
+                              f"supervisor changed {dims} (v{version}); hands off "
+                              f"{held + (['caller_id'] if 'caller_id' in dims else []) or 'nothing else'} for "
+                              f"{SUPERVISOR_HOLD_H}h",
                               {"version": version, "dims": dims, "edited_at_minute": minute})
                 log(f"{wf}: supervisor edit v{version} {dims}")
             st["seen_version"] = version
@@ -186,8 +187,9 @@ class Controller:
         new["prompt_version"] = pv
         ev = {"incident": {k: v for k, v in st["incident"].items() if k != "failed_fixes"}, "validation": val,
               "selection": how}
-        notes = [f"switch prompt {bad} -> {pv} because hallucination flags are elevated on {bad}; "
-                 f"{pv} validated at {val['pass_rate']:.3f}"]
+        why = {"validation": f"{bad} failed validation", "engagement_regression":
+               f"{bad} cut engagement"}.get(st["incident"].get("reason"), f"hallucination flags are elevated on {bad}")
+        notes = [f"switch prompt {bad} -> {pv} because {why}; {pv} validated at {val['pass_rate']:.3f}"]
         return self.propose(wf, meta, cfg, version, new, "incident", notes, ev, st, now,
                             evidence={"validation_run_id": val["validation_run_id"]})
 
@@ -272,6 +274,8 @@ class Controller:
         since = now // 60 - 24 * 7
         for d, a, b in self.diff_dims(cfg, new):
             if d == "prompt_version":
+                out["prompt_note"] = ("prompt changes are not replayable per call; observed flag and engagement "
+                                      "rates per prompt on this workflow are shown instead")
                 t = self.s.arm_totals(wf, "prompt_version", "*", since_hb=since)
                 out["dims"][d] = {p: {"connected": v[1], "flag_rate": round(rate(v[3], v[1]), 4),
                                       "engagement": round(rate(v[2], v[1]), 4)} for p, v in t.items()}
