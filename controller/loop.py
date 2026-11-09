@@ -121,7 +121,10 @@ class Controller:
             actions += self.propose(wf, meta, cfg, version, new, "rollback", notes, ev, st, now)
 
         # 3. caller-ID health / spread
-        actions += self.caller_ids(wf, meta, cfg, version, st, did_notes, now)
+        if self.caller_ids(wf, meta, cfg, version, st, did_notes, now):
+            actions += 1
+            cur = self.c.get(f"/workflows/{wf}/config")  # our own auto-apply bumped the version
+            cfg, version = cur["config"], cur["version"]
 
         # 4. daily batched proposal (experiments + non-urgent caller-ID changes)
         if self.can_plan(wf, meta, st, now):
@@ -227,7 +230,8 @@ class Controller:
             impact = min(1.0, max(0.1, abs(dry.get("expected_relative_change", 0)) * 5))
             if kind == "rollback":
                 impact = max(impact, 0.6)
-        summary = f"{wf}: " + "; ".join(notes)
+        summary = f"{wf}: " + "; ".join(notes or [f"set {d} to {fmt(b) if isinstance(b, dict) else b}"
+                                                  for d, _, b in self.diff_dims(cfg, new)])
         rationale = ("Population-level evidence from this workflow's own calls (randomised arms, same hours). "
                      "Winners are chosen by a two-proportion z-test with Bonferroni correction, never by an LLM. "
                      + json.dumps(ev, default=str)[:3000])
@@ -241,7 +245,7 @@ class Controller:
         out = []
         for d in ("welcome_message", "voice", "caller_id"):
             a, b = cfg["allocations"]["default"][d], new["allocations"]["default"][d]
-            if tv_distance(a, b) > 1e-6:
+            if tv_distance(a, b) > 1e-3:
                 out.append((d, a, b))
         if cfg["prompt_version"] != new["prompt_version"]:
             out.append(("prompt_version", cfg["prompt_version"], new["prompt_version"]))
@@ -315,13 +319,40 @@ class Controller:
 
     @staticmethod
     def with_changes(cfg, changes):
+        """Copy of cfg with new default distributions, every weight sent as an integer out of WIRE_SCALE.
+
+        The simulator re-normalises whatever weights it receives. Floats like 1/6 don't survive a second
+        normalisation bit-for-bit, so re-sending an unchanged distribution would look like a change to it
+        (and an auto-apply touching 'voice' gets refused). Integers out of a fixed total normalise to the
+        same floats every time, so unchanged dims stay unchanged.
+        """
         new = copy.deepcopy(cfg)
+        for key, dims in new["allocations"].items():
+            for d, dist in list(dims.items()):
+                dims[d] = to_wire(dist)
         for d, dist in changes.items():
-            new["allocations"]["default"][d] = {k: round(v, 6) for k, v in dist.items() if v > 0}
+            new["allocations"]["default"][d] = to_wire(dist)
         return new
 
     def differs(self, cfg, new) -> bool:
         return bool(self.diff_dims(cfg, new))
+
+
+WIRE_SCALE = 10_000
+
+
+def to_wire(dist: dict) -> dict:
+    """{option: float} -> {option: int} summing to WIRE_SCALE, or the original if that would alter it."""
+    total = sum(dist.values())
+    ints = {k: int(round(v / total * WIRE_SCALE)) for k, v in dist.items()}
+    ints = {k: v for k, v in ints.items() if v > 0}
+    if not ints:
+        return dist
+    top = max(sorted(ints), key=ints.get)
+    ints[top] += WIRE_SCALE - sum(ints.values())
+    if any(abs(ints.get(k, 0) / WIRE_SCALE - v / total) > 2e-4 for k, v in dist.items()):
+        return dist
+    return ints
 
 
 def fmt(d: dict) -> str:

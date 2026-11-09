@@ -16,8 +16,8 @@ Design (see SUBMISSION.md §5 for the reasoning):
   * Elimination: a challenger significantly worse than the champion is dropped (alpha 0.05, Bonferroni).
   * Promotion: a challenger significantly better (alpha 0.01, Bonferroni), with >= 2% relative lift and
     no significant pickup drop beyond the guardrail, becomes 100%.
-  * Decay: once promoted, the winner's last-24h rate (same prompt) is compared with its rate during the
-    experiment. A significant drop that leaves it no better than the old champion triggers a rollback.
+  * Decay: once promoted, the winner's last-24h rate is compared with its first 24h after promotion
+    (same prompt). A significant drop that leaves it below the old champion triggers a rollback.
 """
 from __future__ import annotations
 
@@ -165,32 +165,38 @@ class Experiments:
 
     # ------------------------------------------------------------------ decay (checked every step)
     def check_decay(self, wf: str, cfg: dict, st: dict, now: int) -> tuple[dict, list[str], dict]:
+        """Compare the winner's last 24h with its first 24h after promotion (same prompt).
+
+        We deliberately do NOT compare with the rate measured during the experiment: the winner was picked
+        *because* that number was high, so it is biased upwards (winner's curse) and a later "drop" would
+        often be regression to the mean, not decay. The first day after promotion is an unbiased baseline.
+        """
         changes, notes, evidence = {}, [], {}
         pv_seg = "pv=" + cfg["prompt_version"]
         for dim in DIMS:
             d = dim_state(st, dim)
             if d["phase"] != "promoted" or not d.get("promo_live_at"):
                 continue
-            if now - d["promo_live_at"] < DECAY_MIN_HOURS * 60:
+            live_hb = d["promo_live_at"] // 60
+            if now // 60 - live_hb < 24 + DECAY_MIN_HOURS:
                 continue
             w, champ = d["winner"], d["prev_champion"]
-            during = self.s.arm_totals(wf, dim, pv_seg, since_hb=(d.get("live_at") or 0) // 60,
-                                       until_hb=d["promo_live_at"] // 60)
-            recent = self.s.arm_totals(wf, dim, pv_seg, since_hb=now // 60 - 24)
-            wd, rw = during.get(w, [0, 0, 0, 0]), recent.get(w, [0, 0, 0, 0])
+            base = self.s.arm_totals(wf, dim, pv_seg, since_hb=live_hb, until_hb=live_hb + 24).get(w, [0, 0, 0, 0])
+            recent = self.s.arm_totals(wf, dim, pv_seg, since_hb=now // 60 - 24).get(w, [0, 0, 0, 0])
+            during = self.s.arm_totals(wf, dim, "*", since_hb=(d.get("live_at") or 0) // 60, until_hb=live_hb)
             cd = during.get(champ, [0, 0, 0, 0])
-            if wd[1] < MIN_CONN_ELIMINATE or rw[1] < MIN_CONN_ELIMINATE or cd[1] < MIN_CONN_ELIMINATE:
+            if base[1] < MIN_CONN_ELIMINATE or recent[1] < MIN_CONN_ELIMINATE or cd[1] < MIN_CONN_ELIMINATE:
                 continue  # not enough comparable data under the current prompt
-            p = p_greater(wd[2], wd[1], rw[2], rw[1])
-            r_recent, r_during, r_champ = rate(rw[2], rw[1]), rate(wd[2], wd[1]), rate(cd[2], cd[1])
-            ev = {"winner": w, "rate_during_test": r_during, "rate_last_24h": r_recent,
+            p = p_greater(base[2], base[1], recent[2], recent[1])
+            r_recent, r_base, r_champ = rate(recent[2], recent[1]), rate(base[2], base[1]), rate(cd[2], cd[1])
+            ev = {"winner": w, "rate_first_24h_after_promotion": r_base, "rate_last_24h": r_recent,
                   "old_champion_rate_during_test": r_champ, "p_drop": p, "prompt": cfg["prompt_version"]}
-            if p < DECAY_ALPHA and r_recent < r_champ * (1 + MIN_LIFT):
+            if p < DECAY_ALPHA and r_recent < r_champ:
                 d.update(phase="cooldown", cooldown_until=now + COOLDOWN_HOURS * 60, decayed=w)
                 d["excluded"].append(w)
                 changes[dim] = {champ: 1.0}
-                notes.append(f"roll back {dim} {w} -> {champ}: engagement fell from {r_during:.3f} to "
-                             f"{r_recent:.3f} (p={p:.4f}), below the old champion's {r_champ:.3f}")
+                notes.append(f"roll back {dim} {w} -> {champ}: engagement fell from {r_base:.3f} (first day after "
+                             f"promotion) to {r_recent:.3f} (last 24h, p={p:.4f}), below {champ}'s {r_champ:.3f}")
                 evidence[dim] = ev
                 self.s.decide(now, wf, "decay_detected", f"{dim}: {w} decayed, rolling back to {champ}", ev)
         return changes, notes, evidence
