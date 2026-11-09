@@ -541,5 +541,5 @@ python -m pytest -q controller_tests
 `./run.sh <SIM_URL>` is the grader's entry point. State goes to `./state/<scenario>.sqlite` (override with
 `STATE_DIR`). Thresholds are module constants at the top of `experiments.py`, `callerid.py` and
 `incidents.py`, each with a comment saying why. The controller package never imports `sim`, never reads
-`runs/` and never opens a scenario file (`grep -rn "sim\.|runs/|scenarios/" controller/` is empty). Only the
+`runs/` and never opens a scenario file (`grep -rnE "import sim|from sim|runs/|scenarios/" controller/` is empty). Only the
 test scripts under `scripts/` do.
