@@ -3,8 +3,8 @@
 Per DID we keep one of three states in wf_state["did"][did]:
   healthy    used at an equal share with the other healthy DIDs
   probing    used at PROBE_SHARE until it has PROBE_MIN_DIALS dials without being flagged
-  unhealthy  not used; re-probed after REST_HOURS (48h if it looked overused, 7 days if its pickup was
-             under half the others', i.e. spam-labelled: re-testing those costs pickup for little chance)
+  unhealthy  not used; re-probed after a rest: 48h, doubling each time it is flagged again, and at least
+             7 days if its pickup was under half the others' (spam-labelled: re-testing costs pickup)
 
 Detection compares a DID's pickup rate with the pooled rate of the other DIDs over the same hours.
 Because every dial picks its DID at random, those calls share the same leads and hours, so a lower rate
@@ -20,9 +20,9 @@ from .stats import p_greater, rate
 
 PROBE_SHARE = 0.05
 PROBE_MIN_DIALS = 300
-MIN_DIALS = 150
+MIN_DIALS = 300
 RATIO = 0.7
-ALPHA = 0.001
+ALPHA = 1e-4  # ~5,000 tests per run (hourly x DIDs x 2 windows x workflows): keep false flags rare
 REST_HOURS = 48         # rest for a DID that looked tired (pickup ratio 0.5-0.7: often just overuse)
 FLAGGED_RATIO = 0.5
 FLAGGED_REST_HOURS = 168  # below half the others' pickup it is spam-labelled; re-testing costs pickup
@@ -68,8 +68,9 @@ class CallerIds:
                 r, ro = rate(dc, dd), rate(oc, od)
                 p = p_greater(oc, od, dc, dd)
                 if ro > 0 and r / ro < RATIO and p < ALPHA:
-                    rest = FLAGGED_REST_HOURS if r / ro < FLAGGED_RATIO else REST_HOURS
-                    info.update(state="unhealthy", since=now, rest_h=rest)
+                    times = info.get("times_flagged", 0) + 1  # each repeat flag doubles the rest (backoff)
+                    rest = max(REST_HOURS * 2 ** (times - 1), FLAGGED_REST_HOURS if r / ro < FLAGGED_RATIO else 0)
+                    info.update(state="unhealthy", since=now, rest_h=rest, times_flagged=times)
                     ev = {"did": d, "window_h": h, "pickup": round(r, 4), "others_pickup": round(ro, 4),
                           "ratio": round(r / ro, 3), "p": p, "dials": dd, "others_dials": od}
                     self.s.decide(now, wf, "did_unhealthy", f"caller ID {d} pickup {r:.3f} vs {ro:.3f} on the "
