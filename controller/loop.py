@@ -102,12 +102,14 @@ class Controller:
         st = self.s.get_state(wf)
         if "did" not in st:
             st["did"] = self.dids.init_state(wf, meta, cfg, now)
-        self.process_config_changes(wf, st, now)
+        self.process_config_changes(wf, st, cfg, now)
         observe(st, cfg, now)
         actions = 0
 
         # 1. hallucination incident (highest priority)
         did_notes = self.dids.update(wf, st, now)
+        if st.pop("screen_prompt", None) == cfg["prompt_version"]:
+            self.inc.screen_new_prompt(wf, meta, st, cfg["prompt_version"], now)
         bad = self.inc.check(wf, cfg, st, now)
         if bad and not self.gov.live(wf, ["incident"]):
             actions += self.fix_incident(wf, meta, cfg, version, st, bad, now)
@@ -137,21 +139,31 @@ class Controller:
             new = self.with_changes(cfg, changes)
             if self.differs(cfg, new):
                 actions += self.propose(wf, meta, cfg, version, new, "experiment", notes, ev, st, now)
+        st["last_cfg"] = cfg
         self.s.put_state(wf, st)
         return actions
 
-    def process_config_changes(self, wf, st, now):
+    def process_config_changes(self, wf, st, cfg, now):
+        """Supervisor edits put the dims they touched on hold. The simulator re-normalises weights on every
+        write, so its changed_dims can list an allocation the supervisor didn't really move; we only count
+        dims whose distribution actually moved compared with the config we saw last step."""
+        prev = st.get("last_cfg")
         seen = st.get("seen_version", 0)
         rows = self.s.db.execute("SELECT version, minute, actor, dims FROM config_changes WHERE wf=? AND version>? "
                                  "ORDER BY version", (wf, seen)).fetchall()
         for version, minute, actor, dims in rows:
             dims = json.loads(dims)
             if actor == "supervisor" and minute >= 0:
+                if prev:
+                    dims = [d for d in dims if d not in ("welcome_message", "voice", "caller_id") or
+                            tv_distance(prev["allocations"]["default"][d], cfg["allocations"]["default"][d]) > 1e-3]
                 held = [d for d in dims if d in DIMS]
                 for d in held:
                     put_on_hold(st, d, now, version)
                 if "caller_id" in dims:
                     st["did_hold_until"] = now + SUPERVISOR_HOLD_H * 60
+                if "prompt_version" in dims:
+                    st["screen_prompt"] = cfg["prompt_version"]
                 self.s.decide(now, wf, "supervisor_edit",
                               f"supervisor changed {dims} (v{version}); we will not touch {held or 'nothing'}"
                               f"{' and caller_id' if 'caller_id' in dims else ''} for {SUPERVISOR_HOLD_H}h",
@@ -170,7 +182,7 @@ class Controller:
             self.s.decide(now, wf, "no_fix", f"no validated fix available for {bad} yet; will retry", {})
             return 0
         pv, val, how = fix
-        new = copy.deepcopy(cfg)
+        new = self.with_changes(cfg, {})
         new["prompt_version"] = pv
         ev = {"incident": {k: v for k, v in st["incident"].items() if k != "failed_fixes"}, "validation": val,
               "selection": how}
@@ -356,4 +368,4 @@ def to_wire(dist: dict) -> dict:
 
 
 def fmt(d: dict) -> str:
-    return ", ".join(f"{k} {v:.0%}" for k, v in sorted(d.items()))
+    return ", ".join(f"{k} {v:.0%}" for k, v in sorted(normalise(d).items()))

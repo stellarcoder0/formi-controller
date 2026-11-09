@@ -92,6 +92,8 @@ class Experiments:
             if d["phase"] == "idle":
                 arms = [o for o in opts if o not in d["excluded"]]
                 champ = champion_of(cur)
+                if champ in d["excluded"]:  # e.g. a decayed winner whose rollback never got applied
+                    champ = d.get("prev_champion") if d.get("prev_champion") in arms else arms[0]
                 if champ not in arms:
                     arms.append(champ)
                 if len(arms) < 2:

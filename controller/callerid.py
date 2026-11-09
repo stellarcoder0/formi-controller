@@ -3,7 +3,8 @@
 Per DID we keep one of three states in wf_state["did"][did]:
   healthy    used at an equal share with the other healthy DIDs
   probing    used at PROBE_SHARE until it has PROBE_MIN_DIALS dials without being flagged
-  unhealthy  not used; re-probed after REST_HOURS (numbers recover when rested, flagged ones don't)
+  unhealthy  not used; re-probed after REST_HOURS (48h if it looked overused, 7 days if its pickup was
+             under half the others', i.e. spam-labelled: re-testing those costs pickup for little chance)
 
 Detection compares a DID's pickup rate with the pooled rate of the other DIDs over the same hours.
 Because every dial picks its DID at random, those calls share the same leads and hours, so a lower rate
@@ -22,7 +23,9 @@ PROBE_MIN_DIALS = 300
 MIN_DIALS = 150
 RATIO = 0.7
 ALPHA = 0.001
-REST_HOURS = 48
+REST_HOURS = 48         # rest for a DID that looked tired (pickup ratio 0.5-0.7: often just overuse)
+FLAGGED_RATIO = 0.5
+FLAGGED_REST_HOURS = 168  # below half the others' pickup it is spam-labelled; re-testing costs pickup
 WINDOWS_H = (6, 24)
 MIN_CHANGE_TV = 0.03
 
@@ -65,7 +68,8 @@ class CallerIds:
                 r, ro = rate(dc, dd), rate(oc, od)
                 p = p_greater(oc, od, dc, dd)
                 if ro > 0 and r / ro < RATIO and p < ALPHA:
-                    info.update(state="unhealthy", since=now)
+                    rest = FLAGGED_REST_HOURS if r / ro < FLAGGED_RATIO else REST_HOURS
+                    info.update(state="unhealthy", since=now, rest_h=rest)
                     ev = {"did": d, "window_h": h, "pickup": round(r, 4), "others_pickup": round(ro, 4),
                           "ratio": round(r / ro, 3), "p": p, "dials": dd, "others_dials": od}
                     self.s.decide(now, wf, "did_unhealthy", f"caller ID {d} pickup {r:.3f} vs {ro:.3f} on the "
@@ -79,10 +83,10 @@ class CallerIds:
                     info.update(state="healthy", since=now)
                     self.s.decide(now, wf, "did_healthy", f"caller ID {d} passed probing ({got} dials)", {"did": d})
                     notes.append(f"caller ID {d} passed its probe ({got} dials, pickup in line with others)")
-            elif info["state"] == "unhealthy" and now - info["since"] >= REST_HOURS * 60:
+            elif info["state"] == "unhealthy" and now - info["since"] >= info.get("rest_h", REST_HOURS) * 60:
                 info.update(state="probing", since=now)
                 self.s.decide(now, wf, "did_reprobe", f"caller ID {d} rested {REST_HOURS}h, probing again", {"did": d})
-                notes.append(f"re-test caller ID {d} at {PROBE_SHARE:.0%} after a {REST_HOURS}h rest")
+                notes.append(f"re-test caller ID {d} at {PROBE_SHARE:.0%} after a {info.get('rest_h', REST_HOURS)}h rest")
         return notes
 
     @staticmethod
