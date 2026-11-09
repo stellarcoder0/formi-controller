@@ -55,11 +55,17 @@ class CallerIds:
         dids = st["did"]
         notes = []
         hb = now // 60
-        for h in WINDOWS_H:
-            t = self.s.arm_totals(wf, "caller_id", "*", since_hb=hb - h)
-            for d, info in dids.items():
-                if info["state"] == "unhealthy":
-                    continue
+        cache = {}
+        for d, info in dids.items():
+            if info["state"] == "unhealthy":
+                continue
+            windows = [(f"last {h}h", hb - h) for h in WINDOWS_H]
+            if info["state"] == "probing":  # a probe is judged on everything since it started
+                windows.append(("since probe start", info["since"] // 60))
+            for label, since in windows:
+                if since not in cache:
+                    cache[since] = self.s.arm_totals(wf, "caller_id", "*", since_hb=since)
+                t = cache[since]
                 dd, dc = _ok(t.get(d))[:2]
                 od = sum(_ok(t.get(o))[0] for o in dids if o != d)
                 oc = sum(_ok(t.get(o))[1] for o in dids if o != d)
@@ -71,12 +77,13 @@ class CallerIds:
                     times = info.get("times_flagged", 0) + 1  # each repeat flag doubles the rest (backoff)
                     rest = max(REST_HOURS * 2 ** (times - 1), FLAGGED_REST_HOURS if r / ro < FLAGGED_RATIO else 0)
                     info.update(state="unhealthy", since=now, rest_h=rest, times_flagged=times)
-                    ev = {"did": d, "window_h": h, "pickup": round(r, 4), "others_pickup": round(ro, 4),
-                          "ratio": round(r / ro, 3), "p": p, "dials": dd, "others_dials": od}
+                    ev = {"did": d, "window": label, "pickup": round(r, 4), "others_pickup": round(ro, 4),
+                          "ratio": round(r / ro, 3), "p": p, "dials": dd, "others_dials": od, "rest_h": rest}
                     self.s.decide(now, wf, "did_unhealthy", f"caller ID {d} pickup {r:.3f} vs {ro:.3f} on the "
-                                  f"other numbers over {h}h — stop using it", ev)
+                                  f"other numbers ({label}) — stop using it for {rest}h", ev)
                     notes.append(f"stop using caller ID {d}: pickup {r:.3f} vs {ro:.3f} on other numbers "
-                                 f"(last {h}h, {dd} dials, p={p:.1e})")
+                                 f"({label}, {dd} dials, p={p:.1e})")
+                    break
         for d, info in dids.items():
             if info["state"] == "probing":
                 got = _ok(self.s.arm_totals(wf, "caller_id", "*", since_hb=info["since"] // 60).get(d))[0]
@@ -86,7 +93,7 @@ class CallerIds:
                     notes.append(f"caller ID {d} passed its probe ({got} dials, pickup in line with others)")
             elif info["state"] == "unhealthy" and now - info["since"] >= info.get("rest_h", REST_HOURS) * 60:
                 info.update(state="probing", since=now)
-                self.s.decide(now, wf, "did_reprobe", f"caller ID {d} rested {REST_HOURS}h, probing again", {"did": d})
+                self.s.decide(now, wf, "did_reprobe", f"caller ID {d} rested {info.get('rest_h', REST_HOURS)}h, probing again", {"did": d})
                 notes.append(f"re-test caller ID {d} at {PROBE_SHARE:.0%} after a {info.get('rest_h', REST_HOURS)}h rest")
         return notes
 
